@@ -1,3 +1,4 @@
+import time
 from PIL import Image
 import numpy as np
 import random
@@ -12,6 +13,7 @@ import math
 device, serialno = ViewClient.connectToDeviceOrExit(verbose=1)
 cmdl = 'input touchscreen swipe 260 700 260 700 400;'
 cmdr = 'input touchscreen swipe 500 700 500 700 400;'
+back = 'input keyevent KEYCODE_BACK'
 package = 'com.minigame.carracing'
 activity = 'com.unity3d.player.UnityPlayerNativeActivity'
 runComponent = package + '/' + activity
@@ -19,64 +21,66 @@ device.startActivity(component=runComponent)
 ViewClient.sleep(3.0)
 device.touch(365, 780, 'DOWN_AND_UP');
 ViewClient.sleep(10.0)
+LOAD = False
 
 #-----------------------Environment------------------------#
 class Environment:
     max = 0
     iter = 0
     count = 0
-    def touch(self, action):
-        if action == 1:
-            device.shell(cmdl)
-        elif action == 2:
-            device.shell(cmdr)
-        else:
-            x = random.randint(0, 1)
-            if x == 1:
-                device.shell(cmdl)
-            else:
-                device.shell(cmdr)
-        device.takeSnapshot(reconnect = True).save('shot.png', 'PNG')
-        image2 = Image.open('shot.png').convert('RGB')
-        image2 = image2.crop((203, 80, 591, 1280)).resize((100, 300))
-        R, G, B = image2.split()
+
+    def __init__(self):
+        self.image2 = device.takeSnapshot(reconnect=True)
+        device.shell(back)
+        self.image2 = self.image2.convert('RGB').crop((203, 80, 591, 1280)).resize((100, 300))
+        R, G, B = self.image2.split()
         r = R.load()
         g = G.load()
         b = B.load()
-        w, h = image2.size
+        w, h = self.image2.size
         for i in range(w):
             for j in range(h):
                 if((r[i, j] > 175 and g[i, j] > 175 and b[i, j] > 175)):
                     r[i, j] = 99
                     g[i, j] = 101
                     b[i, j] = 99
-        image2 = Image.merge('RGB', (R, G, B))
-        image2 = np.array(image2)
-        return image2, getReward(), isOver()
+        self.image2 = Image.merge('RGB', (R, G, B))
+        self.image2 = np.array(self.image2).astype('float32')
+
+    def touch(self, action):
+        device.touch(350, 650, 'DOWN_AND_UP');
+        if action == 0:
+            device.shell(cmdl)
+        elif action == 1:
+            device.shell(cmdr)
+        image = device.takeSnapshot(reconnect = True)
+        device.shell(back)
+        # image2 = Image.open('shot.png').convert('RGB')
+        self.image2 = image.crop((203, 80, 591, 1280)).resize((100, 300)).convert('RGB')
+        R, G, B = self.image2.split()
+        r = R.load()
+        g = G.load()
+        b = B.load()
+        w, h = self.image2.size
+        for i in range(w):
+            for j in range(h):
+                if((r[i, j] > 175 and g[i, j] > 175 and b[i, j] > 175)):
+                    r[i, j] = 99
+                    g[i, j] = 101
+                    b[i, j] = 99
+        self.image2 = Image.merge('RGB', (R, G, B))
+        self.image2 = np.array(self.image2).astype('float32')
+        return self.image2, getReward(image), isOver(image)
 
     def run(self, agent):
-        count = self.count
         totalReward = 0
         while True:
-            count+=1
-            device.takeSnapshot(reconnect=True).save('shot1.png', 'PNG')
-            image1 = Image.open('shot1.png').convert('RGB')
-            image1 = image1.crop((203, 80, 591, 1280)).resize((100, 300))
-            R, G, B = image1.convert('RGB').split()
-            r = R.load()
-            g = G.load()
-            b = B.load()
-            w, h = image1.size
-            for i in range(w):
-                for j in range(h):
-                    if((r[i, j] > 175 and g[i, j] > 175 and b[i, j] > 175)):
-                        r[i, j] = 99
-                        g[i, j] = 101
-                        b[i, j] = 99
-            image1 = Image.merge('RGB', (R, G, B))
-            image1 = np.array(image1)
+            self.count+=1
+            image1 = self.image2
             action = agent.extrapolate(image1)
+            print('epsilon' + str(agent.epsilon))
             state = image1
+            device.touch(350, 650, 'DOWN_AND_UP');
             nextState, reward, done = self.touch(action)
             if done:
                 nextState = None
@@ -89,26 +93,33 @@ class Environment:
         self.iter+=1
         if self.max < totalReward:
             self.max = totalReward
-        print("Total reward:" + str(totalReward) + "Max till now: " + str(self.max) + "I: " + str(self.iter))
-        self.count += count
+        print("Total reward: " + str(totalReward) + " | Max till now: " + str(self.max) + " | I: " + str(self.iter))
 
 #---------------------------Brain------------------------------#
 class Brain:
 
     def __init__(self, actionCount):
         self.model = Sequential()
-		#image dimensions can be changed from here
-        self.model.add(Conv2D(12, (5, 5), strides=1, activation='relu', input_shape=(300, 100, 3), kernel_initializer='glorot_uniform', use_bias=True))
+        self.model.add(Lambda(lambda x: x/127.5-1.0, input_shape=(300, 100, 3), output_shape=(300, 100, 3)))
+
+        self.model.add(Conv2D(filters=32, kernel_size=(3, 3), strides=(2), activation='relu'))
         self.model.add(MaxPooling2D(pool_size=(2, 2)))
-        self.model.add(Conv2D(8, (3, 3), strides=1, activation='relu', kernel_initializer='glorot_uniform', use_bias=True))
+        self.model.add(Dropout(0.2))
+
+        self.model.add(Conv2D(64, (3, 3),strides=(1), activation='relu'))
         self.model.add(MaxPooling2D(pool_size=(2, 2)))
+        self.model.add(Dropout(0.2))
+
+        self.model.add(Conv2D(64, (3, 3), strides=(1), activation='relu'))
+        self.model.add(MaxPooling2D(pool_size=(2, 2)))
+        self.model.add(Dropout(0.2))
+
         self.model.add(Flatten())
-        self.model.add(Dense(units=100, activation="tanh", use_bias=True))
-        self.model.add(Dense(units=50, activation="tanh", use_bias=True))
-        self.model.add(Dense(units=actionCount, activation="relu"))
+        self.model.add(Dense(92, activation='relu'))
+        self.model.add(Dense(actionCount, activation='relu'))
         self.model.compile(loss="mse", optimizer=SGD(lr=0.05), metrics=['accuracy'])
         if LOAD:
-            self.model.load_weights('rf.h5')
+            self.model.load_weights('rf_new_1537535039.01.h5')
 
     def train(self, x, y):
         self.model.fit(x, y, batch_size = 1, epochs = 1, verbose = 1)
@@ -141,7 +152,7 @@ class Memory:   # stored as ( s, a, r, s_ )
 memoryCapacity = 1000
 batchSize = 4
 gamma = 0.99
-maxEpsilon = 0.3
+maxEpsilon = 0.9
 minEpsilon = 0.01
 lambda_ = 0.01
 
@@ -191,15 +202,18 @@ class Agent:
         self.brain.train(x, y)
 
 #------------------------------Main--------------------------------#
-roadFighter = Environment()
-LOAD = False
-actionCount = 3
-agent = Agent(actionCount)
-try:
-    while True:
-        roadFighter.run(agent)
-        device.touch(365, 780, 'DOWN_AND_UP');
-        ViewClient.sleep(10.0)
-finally:
-    agent.brain.model.save("rf.h5")
-    print("GAME OVER! after ", roadFighter.count, "touches!")
+if __name__ == '__main__':
+    roadFighter = Environment()
+    actionCount = 2
+    agent = Agent(actionCount)
+    MAX_EP = 128
+    try:
+        t = 0
+        while t < MAX_EP:
+            t += 1
+            roadFighter.run(agent)
+            device.touch(365, 780, 'DOWN_AND_UP');
+            ViewClient.sleep(10.0)
+    finally:
+        agent.brain.model.save('rf_new_' + str(time.time()) + '.h5')
+        print("GAME OVER! after ", roadFighter.count, "touches!")
